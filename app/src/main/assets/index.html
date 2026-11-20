@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>فيديو ← برومبت</title>
+<style>
+  :root{--bg:#0f1115;--card:#181b22;--line:#2a2f3a;--txt:#e9ecf1;--mut:#8b93a3;--acc:#4f8cff;--ok:#2fbf71;--err:#ff5d5d}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);font-family:system-ui,-apple-system,"Segoe UI",Tahoma,sans-serif;font-size:16px}
+  header{padding:18px 16px 6px}
+  h1{font-size:22px;margin:0}
+  header p{margin:4px 0 0;color:var(--mut);font-size:14px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;margin:12px;padding:14px}
+  label{display:block;font-size:14px;color:var(--mut);margin:10px 0 6px}
+  input,select,textarea{width:100%;background:#0c0e12;color:var(--txt);border:1px solid var(--line);border-radius:10px;padding:11px;font-size:15px;font-family:inherit}
+  textarea{min-height:160px;direction:auto}
+  button{width:100%;border:0;border-radius:12px;padding:14px;font-size:16px;font-weight:600;background:var(--acc);color:#fff;margin-top:12px}
+  button.sec{background:#262b36}
+  button:disabled{opacity:.45}
+  .pick{border:2px dashed var(--line);border-radius:14px;padding:22px;text-align:center;color:var(--mut)}
+  .pick b{color:var(--txt);display:block;margin-bottom:4px}
+  video{width:100%;border-radius:10px;margin-top:10px;display:none;background:#000}
+  .steps div{padding:6px 0;color:var(--mut);font-size:15px}
+  .steps .run{color:var(--txt)} .steps .done{color:var(--ok)} .steps .bad{color:var(--err)}
+  progress{width:100%;height:10px;margin-top:8px}
+  .tabs{display:flex;gap:6px;margin-bottom:8px}
+  .tabs button{margin:0;padding:9px;font-size:14px;background:#262b36}
+  .tabs button.on{background:var(--acc)}
+  details summary{color:var(--mut);font-size:14px;cursor:pointer}
+  .row{display:flex;gap:8px}.row>*{flex:1}
+  #msg{font-size:14px;margin-top:8px;color:var(--mut);white-space:pre-wrap}
+  #frames{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:8px}
+  #frames img{width:100%;border-radius:6px}
+</style>
+</head>
+<body>
+<header>
+  <h1>🎬 فيديو ← صوت + نص + برومبت</h1>
+  <p>اختار فيديو، والتطبيق يسويلك ملف ZIP بيه كلشي</p>
+</header>
+
+<div class="card">
+  <label for="file" class="pick" id="pickBox"><b>📂 اضغط لاختيار فيديو</b><span id="fname">MP4 / MOV / MKV ...</span></label>
+  <input type="file" id="file" accept="video/*,audio/*" style="display:none">
+  <video id="vid" controls playsinline></video>
+  <div class="row">
+    <div><label>لغة الكلام</label>
+      <select id="lang"><option value="ar">عربي</option><option value="en">English</option><option value="">تلقائي</option></select></div>
+    <div><label>عدد اللقطات</label>
+      <select id="nframes"><option>0</option><option>3</option><option selected>6</option><option>9</option></select></div>
+  </div>
+  <button id="go" disabled>▶️ ابدأ</button>
+</div>
+
+<div class="card" id="progCard" style="display:none">
+  <div class="steps" id="steps"></div>
+  <progress id="bar" max="100" value="0"></progress>
+  <div id="msg"></div>
+</div>
+
+<div class="card" id="resCard" style="display:none">
+  <div class="tabs">
+    <button data-t="prompt" class="on">البرومبت</button>
+    <button data-t="timed">النص بالتوقيت</button>
+    <button data-t="plain">النص</button>
+  </div>
+  <textarea id="out" readonly></textarea>
+  <div id="frames"></div>
+  <div class="row">
+    <button class="sec" id="copy">📋 نسخ</button>
+    <button id="save">💾 حفظ ملف ZIP</button>
+  </div>
+</div>
+
+<div class="card">
+  <details id="setBox">
+    <summary>⚙️ الإعدادات (مفتاح API)</summary>
+    <label>مفتاح Groq API (مجاني من console.groq.com/keys)</label>
+    <input id="key" type="password" placeholder="gsk_..." autocomplete="off">
+    <label>رابط الخدمة (متوافق مع OpenAI)</label>
+    <input id="base" value="https://api.groq.com/openai/v1" dir="ltr">
+    <div class="row">
+      <div><label>موديل التفريغ</label><input id="sttModel" value="whisper-large-v3" dir="ltr"></div>
+      <div><label>موديل البرومبت</label><input id="llmModel" value="llama-3.3-70b-versatile" dir="ltr"></div>
+    </div>
+    <button class="sec" id="saveSet">حفظ الإعدادات</button>
+  </details>
+</div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const S = { file:null, result:null, tab:"prompt" };
+const CHUNK_SEC = 600;          // 10 دقائق لكل جزء (أقل من حد 25MB)
+const SR = 16000;
+
+/* ---------------- الإعدادات ---------------- */
+const store = {
+  get(k,d){ try{ return localStorage.getItem(k) ?? d }catch(e){ return d } },
+  set(k,v){ try{ localStorage.setItem(k,v) }catch(e){} }
+};
+["key","base","sttModel","llmModel"].forEach(k=>{ const v=store.get("vp_"+k,null); if(v) $(k).value=v; });
+$("lang").value = store.get("vp_lang","ar");
+$("saveSet").onclick = ()=>{ ["key","base","sttModel","llmModel"].forEach(k=>store.set("vp_"+k,$(k).value.trim())); toast("✅ انحفظت الإعدادات"); $("setBox").open=false; };
+if(!$("key").value) $("setBox").open = true;
+
+/* ---------------- اختيار الفيديو ---------------- */
+$("file").onchange = e=>{
+  const f = e.target.files[0]; if(!f) return;
+  S.file = f;
+  $("fname").textContent = `${f.name}  (${(f.size/1048576).toFixed(1)} MB)`;
+  const v=$("vid"); v.src = URL.createObjectURL(f); v.style.display="block";
+  $("go").disabled = false;
+};
+
+/* ---------------- الخطوات ---------------- */
+const STEPS = ["قراءة الفيديو","استخراج الصوت","استخراج اللقطات","تحويل الكلام لنص","كتابة البرومبت","تجهيز ملف ZIP"];
+function initSteps(){ $("steps").innerHTML = STEPS.map((s,i)=>`<div id="st${i}">⏳ ${s}</div>`).join(""); $("progCard").style.display="block"; }
+function step(i,state){ const el=$("st"+i); if(!el) return; el.className=state; el.textContent=(state==="done"?"✅ ":state==="run"?"🔄 ":state==="bad"?"❌ ":"⏳ ")+STEPS[i]; }
+function prog(p,m){ $("bar").value=p; if(m!==undefined) $("msg").textContent=m; }
+function toast(m){ $("msg").textContent=m; $("progCard").style.display="block"; }
+
+/* ---------------- أدوات ---------------- */
+function fmt(sec,srt){ sec=Math.max(0,sec); const h=Math.floor(sec/3600), m=Math.floor(sec%3600/60), s=Math.floor(sec%60);
+  const p=n=>String(n).padStart(2,"0"); let r=`${p(h)}:${p(m)}:${p(s)}`;
+  if(srt){ r+=","+String(Math.min(999,Math.round((sec%1)*1000))).padStart(3,"0"); } return r; }
+
+function encodeWav(samples, rate){
+  const buf=new ArrayBuffer(44+samples.length*2), v=new DataView(buf);
+  const w=(o,s)=>{ for(let i=0;i<s.length;i++) v.setUint8(o+i,s.charCodeAt(i)); };
+  w(0,"RIFF"); v.setUint32(4,36+samples.length*2,true); w(8,"WAVE"); w(12,"fmt ");
+  v.setUint32(16,16,true); v.setUint16(20,1,true); v.setUint16(22,1,true);
+  v.setUint32(24,rate,true); v.setUint32(28,rate*2,true); v.setUint16(32,2,true); v.setUint16(34,16,true);
+  w(36,"data"); v.setUint32(40,samples.length*2,true);
+  let o=44; for(let i=0;i<samples.length;i++,o+=2){ const s=Math.max(-1,Math.min(1,samples[i])); v.setInt16(o,s<0?s*0x8000:s*0x7FFF,true); }
+  return new Uint8Array(buf);
+}
+
+/* ZIP بسيط (بدون ضغط) */
+const CRC_T = (()=>{ const t=new Uint32Array(256); for(let n=0;n<256;n++){ let c=n; for(let k=0;k<8;k++) c=c&1?0xEDB88320^(c>>>1):c>>>1; t[n]=c>>>0; } return t; })();
+function crc32(u8){ let c=0xFFFFFFFF; for(let i=0;i<u8.length;i++) c=CRC_T[(c^u8[i])&0xFF]^(c>>>8); return (c^0xFFFFFFFF)>>>0; }
+function makeZip(files){ // [{name, data:Uint8Array}]
+  const enc=new TextEncoder(), parts=[], central=[]; let off=0;
+  const d=new Date(), dt=((d.getHours()<<11)|(d.getMinutes()<<5)|(d.getSeconds()>>1)), dd=(((d.getFullYear()-1980)<<9)|((d.getMonth()+1)<<5)|d.getDate());
+  for(const f of files){
+    const nm=enc.encode(f.name), crc=crc32(f.data), sz=f.data.length;
+    const h=new DataView(new ArrayBuffer(30));
+    h.setUint32(0,0x04034b50,true); h.setUint16(4,20,true); h.setUint16(6,0x0800,true); h.setUint16(8,0,true);
+    h.setUint16(10,dt,true); h.setUint16(12,dd,true); h.setUint32(14,crc,true); h.setUint32(18,sz,true); h.setUint32(22,sz,true);
+    h.setUint16(26,nm.length,true); h.setUint16(28,0,true);
+    parts.push(new Uint8Array(h.buffer),nm,f.data);
+    const c=new DataView(new ArrayBuffer(46));
+    c.setUint32(0,0x02014b50,true); c.setUint16(4,20,true); c.setUint16(6,20,true); c.setUint16(8,0x0800,true); c.setUint16(10,0,true);
+    c.setUint16(12,dt,true); c.setUint16(14,dd,true); c.setUint32(16,crc,true); c.setUint32(20,sz,true); c.setUint32(24,sz,true);
+    c.setUint16(28,nm.length,true); c.setUint32(42,off,true);
+    central.push(new Uint8Array(c.buffer),nm);
+    off+=30+nm.length+sz;
+  }
+  const cSize=central.reduce((a,b)=>a+b.length,0), e=new DataView(new ArrayBuffer(22));
+  e.setUint32(0,0x06054b50,true); e.setUint16(8,files.length,true); e.setUint16(10,files.length,true);
+  e.setUint32(12,cSize,true); e.setUint32(16,off,true);
+  return new Blob([...parts,...central,new Uint8Array(e.buffer)],{type:"application/zip"});
+}
+
+/* ---------------- 1+2) الصوت ---------------- */
+async function decodeAudio(file){
+  const ab = await file.arrayBuffer();
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  const ctx = new Ctx();
+  let decoded;
+  try { decoded = await new Promise((res,rej)=>{ const p=ctx.decodeAudioData(ab,res,rej); if(p&&p.then) p.then(res,rej); }); }
+  finally { try{ ctx.close() }catch(e){} }
+  // تحويل إلى 16kHz مونو
+  const len = Math.ceil(decoded.duration*SR);
+  const off = new OfflineAudioContext(1,len,SR);
+  const src = off.createBufferSource(); src.buffer=decoded; src.connect(off.destination); src.start();
+  const out = await off.startRendering();
+  return { samples: out.getChannelData(0), duration: decoded.duration };
+}
+
+/* ---------------- 3) اللقطات ---------------- */
+function seek(v,t){ return new Promise(r=>{ const h=()=>{ v.removeEventListener("seeked",h); r(); }; v.addEventListener("seeked",h); v.currentTime=t; }); }
+async function grabFrames(n){
+  if(!n) return [];
+  const v=document.createElement("video"); v.muted=true; v.playsInline=true; v.src=URL.createObjectURL(S.file);
+  await new Promise((r,j)=>{ v.onloadeddata=r; v.onerror=()=>j(new Error("ما كدرت اقرا صورة الفيديو")); });
+  if(!v.videoWidth) return [];
+  const W=Math.min(960,v.videoWidth), H=Math.round(v.videoHeight*W/v.videoWidth);
+  const c=document.createElement("canvas"); c.width=W; c.height=H; const g=c.getContext("2d");
+  const frames=[];
+  for(let i=0;i<n;i++){
+    const t=v.duration*(i+0.5)/n; await seek(v,t); g.drawImage(v,0,0,W,H);
+    const blob=await new Promise(r=>c.toBlob(r,"image/jpeg",0.85));
+    frames.push({t, data:new Uint8Array(await blob.arrayBuffer()), url:URL.createObjectURL(blob)});
+  }
+  URL.revokeObjectURL(v.src);
+  return frames;
+}
+
+/* ---------------- 4) التفريغ ---------------- */
+async function api(path, body, isForm){
+  const key=$("key").value.trim(); if(!key) throw new Error("حط مفتاح API بالإعدادات أول");
+  const r = await fetch($("base").value.trim().replace(/\/$/,"")+path, {
+    method:"POST", headers: isForm?{Authorization:"Bearer "+key}:{Authorization:"Bearer "+key,"Content-Type":"application/json"},
+    body: isForm?body:JSON.stringify(body) });
+  const txt = await r.text();
+  if(!r.ok){ let m=txt; try{ m=JSON.parse(txt).error.message }catch(e){} throw new Error(`خطأ ${r.status}: ${m}`); }
+  return JSON.parse(txt);
+}
+async function transcribe(samples, lang){
+  const total=Math.ceil(samples.length/(CHUNK_SEC*SR)), segs=[]; let detected=lang||"";
+  for(let i=0;i<total;i++){
+    prog(40+Math.round(40*i/total), `تفريغ الجزء ${i+1} من ${total}...`);
+    const part=samples.subarray(i*CHUNK_SEC*SR,(i+1)*CHUNK_SEC*SR);
+    const fd=new FormData();
+    fd.append("file", new Blob([encodeWav(part,SR)],{type:"audio/wav"}), `part${i}.wav`);
+    fd.append("model",$("sttModel").value.trim());
+    fd.append("response_format","verbose_json");
+    fd.append("temperature","0");
+    if(lang) fd.append("language",lang);
+    let res, tries=0;
+    while(true){ try{ res=await api("/audio/transcriptions",fd,true); break; }
+      catch(e){ if(++tries>=3) throw e; await new Promise(r=>setTimeout(r,3000*tries)); } }
+    if(res.language && !detected) detected=res.language;
+    const base=i*CHUNK_SEC;
+    if(res.segments && res.segments.length) res.segments.forEach(s=>{ const t=(s.text||"").trim(); if(t) segs.push({start:base+s.start,end:base+s.end,text:t}); });
+    else if(res.text && res.text.trim()) segs.push({start:base,end:base+part.length/SR,text:res.text.trim()});
+  }
+  return {segs, language:detected||"?"};
+}
+
+/* ---------------- 5) البرومبت ---------------- */
+function templatePrompt(info,timed){
+  return `# برومبت كامل عن الفيديو: ${info.file}
+
+## معلومات تقنية
+- المدة: ${info.duration}
+- الدقة: ${info.width||"?"}x${info.height||"?"}
+- لغة الكلام: ${info.language}
+
+## المطلوب
+أنت محلل محتوى فيديو محترف. اعتماداً على النص الكامل بالأسفل:
+1. اكتب ملخص واضح للفيديو.
+2. استخرج الأفكار الرئيسية بالترتيب مع توقيت كل فكرة.
+3. حدد الموضوع، الجمهور المستهدف، وأسلوب المتحدث.
+4. اقترح 5 عناوين جذابة ووصف وهاشتاكات.
+5. اقترح أفضل المقاطع القصيرة (ريلز/شورتس) مع توقيتاتها.
+
+## النص الكامل مع التوقيتات
+${timed}
+`;
+}
+async function aiPrompt(info,timed){
+  const t = timed.length>90000 ? timed.slice(0,90000)+"\n...(النص مقطوع لطوله)" : timed;
+  const msg = `هذا تفريغ نصي (مع التوقيتات) لفيديو اسمه "${info.file}"، مدته ${info.duration}، دقته ${info.width}x${info.height}، ولغة الكلام فيه ${info.language}.
+
+اكتب "برومبت" كامل ومفصّل باللغة العربية يصف هذا الفيديو، بحيث لو أعطيته لأي ذكاء اصطناعي يفهم الفيديو بالكامل ويقدر يعيد إنتاجه أو يشتغل عليه. لازم يحتوي:
+- ملخص المحتوى والفكرة الرئيسية
+- تسلسل الأفكار/المشاهد بالترتيب مع التوقيتات
+- أسلوب المتحدث ونبرة الفيديو والجمهور المستهدف
+- الكلمات المفتاحية والمواضيع
+- اقتراحات عناوين ووصف وهاشتاكات
+- أفضل المقاطع القصيرة (ريلز/شورتس) مع توقيتاتها
+اكتب البرومبت بصيغة Markdown فقط بدون مقدمات.
+
+التفريغ:
+${t}`;
+  const r = await api("/chat/completions",{model:$("llmModel").value.trim(),temperature:0.4,max_tokens:4000,messages:[{role:"user",content:msg}]});
+  return r.choices[0].message.content.trim();
+}
+
+/* ---------------- التشغيل ---------------- */
+$("go").onclick = async ()=>{
+  if(!S.file) return;
+  if(!$("key").value.trim()){ $("setBox").open=true; toast("⚠️ حط مفتاح Groq API بالإعدادات أول"); return; }
+  store.set("vp_lang",$("lang").value);
+  $("go").disabled=true; $("resCard").style.display="none"; initSteps();
+  let cur=0;
+  try{
+    const enc=new TextEncoder(), vid=$("vid");
+    step(cur=0,"run"); prog(3,"جاري قراءة الملف...");
+    if(!vid.duration || isNaN(vid.duration)) await new Promise(r=>{ vid.onloadedmetadata=r; setTimeout(r,4000); });
+    step(0,"done");
+
+    step(cur=1,"run"); prog(10,"استخراج الصوت (الفيديوات الكبيرة تاخذ وقت)...");
+    const {samples,duration} = await decodeAudio(S.file);
+    const info = { file:S.file.name, size_mb:+(S.file.size/1048576).toFixed(2), duration:fmt(duration), duration_sec:+duration.toFixed(2),
+                   width:vid.videoWidth||null, height:vid.videoHeight||null };
+    step(1,"done");
+
+    step(cur=2,"run"); prog(25,"أخذ لقطات من الفيديو...");
+    let frames=[]; try{ frames=await grabFrames(+$("nframes").value); }catch(e){ console.warn(e); }
+    step(2,"done");
+
+    step(cur=3,"run");
+    const {segs,language}=await transcribe(samples,$("lang").value);
+    info.language=language; info.segments=segs.length;
+    const plain=segs.map(s=>s.text).join(" ");
+    const timed=segs.map(s=>`[${fmt(s.start)} - ${fmt(s.end)}] ${s.text}`).join("\n");
+    const srt=segs.map((s,i)=>`${i+1}\n${fmt(s.start,true)} --> ${fmt(s.end,true)}\n${s.text}\n`).join("\n");
+    info.words=plain.split(/\s+/).filter(Boolean).length;
+    step(3,"done");
+    if(!segs.length) toast("⚠️ ما انلگى كلام واضح بالفيديو");
+
+    step(cur=4,"run"); prog(85,"كتابة البرومبت...");
+    let prompt, src="ai";
+    try{ prompt = segs.length ? await aiPrompt(info,timed) : null; }catch(e){ console.warn(e); }
+    if(!prompt){ prompt=templatePrompt(info,timed); src="template"; }
+    info.prompt_source=src; info.created=new Date().toISOString();
+    step(4,"done");
+
+    step(cur=5,"run"); prog(95,"تجهيز ملف ZIP...");
+    const folder=S.file.name.replace(/\.[^.]+$/,"").replace(/[\\/:*?"<>|]/g,"_")+"_"+new Date().toISOString().slice(0,19).replace(/[-:T]/g,"");
+    const files=[
+      {name:`${folder}/prompt.md`, data:enc.encode(prompt)},
+      {name:`${folder}/transcript.txt`, data:enc.encode(plain+"\n")},
+      {name:`${folder}/transcript_timestamps.txt`, data:enc.encode(timed+"\n")},
+      {name:`${folder}/subtitles.srt`, data:enc.encode(srt)},
+      {name:`${folder}/info.json`, data:enc.encode(JSON.stringify(info,null,2))},
+      {name:`${folder}/audio.wav`, data:encodeWav(samples,SR)},
+      ...frames.map((f,i)=>({name:`${folder}/frames/frame_${String(i+1).padStart(2,"0")}_${fmt(f.t).replace(/:/g,"-")}.jpg`, data:f.data}))
+    ];
+    S.result={ zip:makeZip(files), zipName:folder+".zip", prompt, plain, timed };
+    step(5,"done"); prog(100,"✅ خلص! تكدر تحفظ ملف ZIP هسه");
+
+    $("frames").innerHTML=frames.map(f=>`<img src="${f.url}">`).join("");
+    showTab("prompt"); $("resCard").style.display="block";
+    $("resCard").scrollIntoView({behavior:"smooth"});
+  }catch(e){
+    console.error(e); step(cur,"bad"); prog($("bar").value,"❌ "+(e.message||e));
+  }finally{ $("go").disabled=false; }
+};
+
+/* ---------------- النتائج ---------------- */
+function showTab(t){ S.tab=t; document.querySelectorAll(".tabs button").forEach(b=>b.classList.toggle("on",b.dataset.t===t)); $("out").value=S.result?S.result[t]:""; }
+document.querySelectorAll(".tabs button").forEach(b=>b.onclick=()=>showTab(b.dataset.t));
+$("copy").onclick = async ()=>{
+  const t=$("out").value;
+  if(window.Android && Android.copy){ Android.copy(t); }
+  else { try{ await navigator.clipboard.writeText(t) }catch(e){ $("out").select(); document.execCommand("copy"); } }
+  toast("📋 انتسخ");
+};
+$("save").onclick = async ()=>{
+  if(!S.result) return;
+  const {zip,zipName}=S.result;
+  if(window.Android && Android.beginFile){
+    $("save").disabled=true; toast("جاري الحفظ...");
+    try{
+      Android.beginFile(zipName,"application/zip");
+      const CH=3*1024*1024;
+      for(let o=0;o<zip.size;o+=CH){
+        const u8=new Uint8Array(await zip.slice(o,o+CH).arrayBuffer());
+        let bin=""; for(let i=0;i<u8.length;i+=0x8000) bin+=String.fromCharCode.apply(null,u8.subarray(i,i+0x8000));
+        Android.appendChunk(btoa(bin));
+      }
+      const where=Android.endFile();
+      toast("✅ انحفظ: "+where);
+    }catch(e){ toast("❌ فشل الحفظ: "+e.message); }
+    finally{ $("save").disabled=false; }
+  } else {
+    const a=document.createElement("a"); a.href=URL.createObjectURL(zip); a.download=zipName; document.body.appendChild(a); a.click(); a.remove();
+  }
+};
+</script>
+</body>
+</html>
